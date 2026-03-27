@@ -26,6 +26,13 @@ use xxhash_rust::xxh3::Xxh3;
 
 /*
 
+incline directory
+branchless upsert
+prefetcging software pupelinign in upsert
+
+
+
+
 atomic changed move away from the sharded dashmap RWlocks to a per bucket CAS operation
 
 
@@ -66,10 +73,6 @@ where
         Self { maps: Box::new(std::array::from_fn(|_| RwLock::new(ShardHashMap::new()))) }
     }
 
-    pub fn with_config(arena: Memory, directory: Memory) -> Self {
-        Self { maps: Box::new(std::array::from_fn(|_| RwLock::new(ShardHashMap::with_config(&arena, &directory)))) }
-    }
-
     pub fn upsert(&self, key: K, value: V) { // rwlock allows for &self nonmut
         let h = pod_hasher(&key, HASH_SEED_SELECTION[0]);
         self.maps[h.shard as usize].write().upsert(key, value);
@@ -101,6 +104,7 @@ unsafe impl<K: Send, V: Send> Sync for ShardHashMap<K, V> {}
 
 #[derive(Debug)]
 pub struct ShardHashMap<K, V> {
+    inlined_directory: [u16; 1024],
     directory_ptr: NonNull<u16>,
     // Directory
     directory_cap: usize,
@@ -153,6 +157,7 @@ impl<K: Hash + PartialEq, V> ShardHashMap<K, V> {
         let mut shard = Self {
  
             // Directory 
+            inlined_directory: [0; 1024],
             directory_ptr: dir_ptr,
             directory_cap: dir_cap_bytes / 2, // capacity in u16s
             directory_len: 1,
@@ -170,62 +175,8 @@ impl<K: Hash + PartialEq, V> ShardHashMap<K, V> {
         let b0 = shard.get_bucket_mut(0);
         b0.local_depth = 0;
         b0.control = [0; 64];
-
-        shard
-    }
-
-    pub fn with_config(arena: &Memory, directory: &Memory) -> Self {
-        // 1. Mmap the Bucket Arena (32MB)
-        //let arena_size = 32 * 1024 * 1024;
-        let arena_size = arena.to_size();
-        let bucket_mmap = MmapMut::map_anon(arena_size).expect("Failed to mmap buckets");
-        let bucket_ptr = NonNull::new(bucket_mmap.as_ptr() as *mut Bucket<K, V>).unwrap();
-        let buckets_capacity = arena_size / std::mem::size_of::<Bucket<K, V>>();
-
-        // 2. Mmap the Directory (2MB) - Supports up to 1M directory entries
-        //let dir_cap_bytes = 2 * 1024 * 1024; 
-        let dir_cap_bytes = directory.to_size();
-        let dir_mmap = MmapMut::map_anon(dir_cap_bytes).expect("Failed to mmap directory");
-        let dir_ptr = NonNull::new(dir_mmap.as_ptr() as *mut u16).unwrap();
-
-
-        unsafe {
-            // Apply to Bucket Arena
-            madvise(bucket_mmap.as_ptr() as *mut c_void, arena_size, MADV_HUGEPAGE);
-            madvise(bucket_mmap.as_ptr() as *mut c_void, arena_size, MADV_WILLNEED);
-
-            // Warmup the pages (best for low latency/consistency, bad for initial boot times) - manual pre page faulting
-            let ptr = bucket_mmap.as_ptr() as *mut u8;
-            for i in (0..arena_size).step_by(4096) {
-                std::ptr::write_volatile(ptr.add(i), 0);
-            }
-        
-            // Apply to Directory (Sequental access during expansion)
-            madvise(dir_mmap.as_ptr() as *mut c_void, dir_cap_bytes, MADV_SEQUENTIAL);
-        
-            *dir_ptr.as_ptr() = 0;
-        }
-
-        let mut shard = Self {
- 
-            // Directory 
-            directory_ptr: dir_ptr,
-            directory_cap: dir_cap_bytes / 2, // capacity in u16s
-            directory_len: 1,
-            global_depth: 0,
-            _mmap_dir: dir_mmap,
-
-            // Buckets
-            buckets: bucket_ptr,
-            buckets_count: 1,
-            buckets_capacity,
-            _mmap_buck: bucket_mmap,
-        };
-
-        // Initialize the first bucket inline
-        let b0 = shard.get_bucket_mut(0);
-        b0.local_depth = 0;
-        b0.control = [0; 64];
+        shard.inlined_directory[0] = 0;
+        unsafe { *shard.directory_ptr.as_ptr() = 0 };
 
         shard
     }
@@ -244,9 +195,19 @@ impl<K: Hash + PartialEq, V> ShardHashMap<K, V> {
 
     #[inline(always)]
     fn get_bucket_handle_fast(&self, h: &Hashes) -> u16 {
-        if self.global_depth == 0 {
-            return unsafe { *self.directory_ptr.as_ptr() };
+        if self.global_depth <= 10 {
+            let idx = if self.global_depth == 0 { 0 } else {
+                (h.directory_key >> (64 - self.global_depth)) as usize
+            };
+            // This is an L1 cache hit. No pointer chasing!
+            return self.inlined_directory[idx];
         }
+
+
+
+        // if self.global_depth == 0 {
+        //     return unsafe { *self.directory_ptr.as_ptr() };
+        // }
 
         // High-bit routing: grab the top 'global_depth' bits
         let idx = (h.directory_key >> (64 - self.global_depth)) as usize;
@@ -277,10 +238,21 @@ impl<K: Hash + PartialEq, V> ShardHashMap<K, V> {
                 std::ptr::write(ptr.add(target_idx + 1), val);
             
             }
+
+            if self.directory_len * 2 <= 1024 {
+                let inline_ptr = self.inlined_directory.as_mut_ptr();
+                for i in (0..cur_size).rev() {
+                    let val = *inline_ptr.add(i);
+                    let target_idx = i * 2;
+                    *inline_ptr.add(target_idx) = val;
+                    *inline_ptr.add(target_idx + 1) = val;
+                }
+            }
         }
 
         self.directory_len *= 2;
         self.global_depth += 1;
+
     }
 
     pub fn upsert(&mut self, key: K, value: V) {
@@ -372,21 +344,34 @@ impl<K: Hash + PartialEq, V> ShardHashMap<K, V> {
                     new_idx += 1;
                 }
                 
-                // Clear the bit we just processed
-                occupied_mask &= !(1 << i);// advanced the loop via tarailign zero returning the next result 1
-                //*occupied_mask &= *occupied_mask - 1; // specifically clear the lowest bit
-                
-                }
+            // Clear the bit we just processed
+            occupied_mask &= !(1 << i);// advanced the loop via tarailign zero returning the next result 1
+            //*occupied_mask &= *occupied_mask - 1; // specifically clear the lowest bit
+            
             }
+        }
 
         let stride = 1 << (self.global_depth - old_depth);
         let half_stride = stride >> 1;
         let block_start = (trigger_hash >> (64 - self.global_depth)) as usize & !(stride - 1);
 
-            // update directory pointers
+
+
         for j in (block_start + half_stride)..(block_start + stride) {
-            unsafe { *self.directory_ptr.as_ptr().add(j) = new_bucket_idx; }
+            unsafe { 
+                // Update main Mmap
+                *self.directory_ptr.as_ptr().add(j) = new_bucket_idx; 
+                
+                if self.directory_len <= 1024 {
+                    self.inlined_directory[j] = new_bucket_idx;
+                }
+            }
         }
+
+        // update directory pointers
+        // for j in (block_start + half_stride)..(block_start + stride) {
+        //     unsafe { *self.directory_ptr.as_ptr().add(j) = new_bucket_idx; }
+        // }
     }
 
     pub fn get(&self, key: &K) -> Option<&V> {
