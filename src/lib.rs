@@ -1,11 +1,23 @@
 use std::{ 
+    hash::Hash, 
+    marker::PhantomData, 
+    mem::MaybeUninit,
     arch::x86_64::{
-        // Primary Operations
-        __m128i, _MM_HINT_T0, _mm_cmpeq_epi8, _mm_loadu_si128, _mm_movemask_epi8, _mm_prefetch, _mm_set1_epi8 // 3 == grab all levels L1, L2, L3 | 2: L2, L3 | 1: L3 | 0: None (fetch into L1 "streaming", evict quickly)
-    }, hash::Hash, marker::PhantomData, mem::MaybeUninit, ptr::NonNull
+        __m128i, 
+        _MM_HINT_T0, 
+        _mm_cmpeq_epi8,
+         _mm_loadu_si128, 
+         _mm_movemask_epi8, 
+         _mm_prefetch, 
+         _mm_set1_epi8 
+    }, 
 };
 use libc::{
-    MADV_HUGEPAGE, MADV_SEQUENTIAL, MADV_WILLNEED, c_void, madvise
+    MADV_HUGEPAGE, 
+    MADV_SEQUENTIAL, 
+    MADV_WILLNEED, 
+    c_void, 
+    madvise
 };
 use memmap2::MmapMut;
 use parking_lot::{MappedRwLockReadGuard, RwLock, RwLockReadGuard};
@@ -44,11 +56,11 @@ impl<K: Hash + PartialEq, V> HashMap<K, V> {
         self.maps[h.shard as usize].write().remove(key, h)
     }
 
-    // pub fn stats(&self) {
-    //     self.maps.iter().for_each(|shard| {
-    //         shard.read().stats();
-    //     });
-    // }
+    pub fn stats(&self) {
+        self.maps.iter().for_each(|shard| {
+            shard.read().stats();
+        });
+    }
 }
 
 unsafe impl<K: Send, V: Send> Send for ShardHashMap<K, V> {}
@@ -57,19 +69,13 @@ unsafe impl<K: Send, V: Send> Sync for ShardHashMap<K, V> {}
 #[derive(Debug)]
 pub struct ShardHashMap<K, V> {
     inlined_directory: [u16; 1024],
-    //directory_ptr: NonNull<u16>,
-    // Directory
     directory_cap: usize,
     directory_len: usize,
     global_depth: u32, 
     _mmap_dir: MmapMut,
-
-    // Buckets
-    //buckets: NonNull<Bucket<K, V>>,
     buckets_count: usize,
     buckets_capacity: usize,
     _mmap_buck: MmapMut,
-
     _marker: PhantomData<(K, V)>
 }
 
@@ -122,7 +128,6 @@ impl<K: Hash + PartialEq, V> ShardHashMap<K, V> {
         let dir_cap_bytes = 2 * 1024 * 1024; 
         //let dir_cap_bytes = directory.to_size();
         let dir_mmap = MmapMut::map_anon(dir_cap_bytes).expect("Failed to mmap directory");
-        let dir_ptr = NonNull::new(dir_mmap.as_ptr() as *mut u16).unwrap();
 
 
         unsafe {
@@ -138,22 +143,14 @@ impl<K: Hash + PartialEq, V> ShardHashMap<K, V> {
         
             // Apply to Directory (Sequental access during expansion)
             madvise(dir_mmap.as_ptr() as *mut c_void, dir_cap_bytes, MADV_SEQUENTIAL);
-        
-            *dir_ptr.as_ptr() = 0;
         }
 
         let mut shard = Self {
- 
-            // Directory 
             inlined_directory: [0; 1024],
-            //directory_ptr: dir_ptr,
             directory_cap: dir_cap_bytes / 2, // capacity in u16s
             directory_len: 1,
             global_depth: 0,
             _mmap_dir: dir_mmap,
-
-            // Buckets
-            //buckets: bucket_ptr,
             buckets_count: 1,
             buckets_capacity,
             _mmap_buck: bucket_mmap,
@@ -165,7 +162,6 @@ impl<K: Hash + PartialEq, V> ShardHashMap<K, V> {
         b0.local_depth = 0;
         b0.control = [0; 64];
         shard.inlined_directory[0] = 0;
-       // unsafe { *shard.directory_ptr.as_ptr() = 0 };
 
         shard
     }

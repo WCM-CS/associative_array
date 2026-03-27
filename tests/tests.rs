@@ -20,7 +20,7 @@ mod tests {
 
         for i in 0..n {
 
-        m.upsert(i, i * i);
+            m.upsert(i, i * i);
         }
 
         for i in 0..n {
@@ -39,7 +39,7 @@ mod tests {
 
         let end = s.elapsed();
         
-        //m.stats();
+        m.stats();
         println!("Line: {:?}", end);
 
     }
