@@ -1,0 +1,19 @@
+[package]
+name = "associative_array"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+libc = "0.2.183"
+memmap2 = "0.9.10"
+mimalloc = "0.1.48"
+parking_lot = "0.12.5"
+
+
+
+
+
+[dependencies.xxhash-rust]
+version = "0.8.12"
+features = ["xxh3", "const_xxh3"]
+
