@@ -105,7 +105,7 @@ pub struct ShardHashMap<K, V> {
     // Directory
     directory_cap: usize,
     directory_len: usize,
-    global_depth: u32, // Required for extendible hashing algorithm
+    global_depth: u32, 
     _mmap_dir: MmapMut,
 
     // Buckets
@@ -532,16 +532,14 @@ struct Payload<K, V> {
 
 impl<K, V> Bucket<K, V> {
     fn free_mask(&self) -> u64 {
-        let occupied_mask = unsafe {
+        !unsafe {
             let ptr = self.control.as_ptr() as *const __m128i;
             let m0 = _mm_movemask_epi8(_mm_loadu_si128(ptr)) as u32;
             let m1 = _mm_movemask_epi8(_mm_loadu_si128(ptr.add(1))) as u32;
             let m2 = _mm_movemask_epi8(_mm_loadu_si128(ptr.add(2))) as u32;
             let m3 = _mm_movemask_epi8(_mm_loadu_si128(ptr.add(3))) as u32;
             (m0 as u64) | ((m1 as u64) << 16) | ((m2 as u64) << 32) | ((m3 as u64) << 48)
-        };
-
-        !occupied_mask
+        }
     }
 }
 
@@ -585,11 +583,6 @@ fn pod_hasher<K: std::hash::Hash>(key: &K, seed: u64) -> Hashes {
 
     Hashes { directory_key, fingerprint, shard }
 }
-
-// struct Config {
-//     arena: Memory,
-//     directory: Memory
-// }
 
 #[derive(Debug, Clone)]
 pub enum Memory {
