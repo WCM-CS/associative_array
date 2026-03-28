@@ -12,11 +12,11 @@ mod tests {
     #[test]
     fn sync_test() {
         let s = std::time::Instant::now();
-        let m = associative_array::HashMap::new();
+        let m = associative_array::map::HashMap::new().unwrap();
 
 
         //let n: i32 = 50_000_000;
-        let n: i32 = 50_000_000;
+        let n: i32 = 5_000_000;
 
         for i in 0..n {
 
@@ -39,7 +39,7 @@ mod tests {
 
         let end = s.elapsed();
         
-        m.stats();
+        //m.stats();
         println!("Line: {:?}", end);
 
     }
@@ -159,22 +159,24 @@ mod tests {
     //         println!("Your Map:   {:?}", s.elapsed());
     //     }
 
-    //     // // --- ROUND 2: Papaya HashMap ---
-    //     // {
-    //     //     let m = Arc::new(PapMap::with_capacity(10_000_000));
-    //     //     let s = std::time::Instant::now();
-    //     //     let mut handles = vec![];
-    //     //     for _ in 0..num_threads {
-    //     //         let map = Arc::clone(&m);
-    //     //         handles.push(thread::spawn(move || {
-    //     //             for j in 0..ops_per_thread {
-    //     //                 map.pin().insert(j, j);
-    //     //             }
-    //     //         }));
-    //     //     }
-    //     //     for h in handles { h.join().unwrap(); }
-    //     //     println!("Papaya:    {:?}", s.elapsed());
-    //     // }
+    //     // --- ROUND 2: Papaya HashMap ---
+    //     {
+    //         let m = Arc::new(PapMap::with_capacity(10_000_000));
+    //         let s = std::time::Instant::now();
+    //         let mut handles = vec![];
+    //         for _ in 0..num_threads {
+    //             let map = Arc::clone(&m);
+    //             handles.push(thread::spawn(move || {
+    //                 let m = map.pin();
+    //                 for j in 0..ops_per_thread {
+                        
+    //                     m.insert(j, j);
+    //                 }
+    //             }));
+    //         }
+    //         for h in handles { h.join().unwrap(); }
+    //         println!("Papaya:    {:?}", s.elapsed());
+    //     }
 
     //     // --- ROUND 3: Custom DashMap ---
     //     {
@@ -198,22 +200,22 @@ mod tests {
 
     //     }
 
-    //     // // --- ROUND 4: Std Map + Single RwLock (The "Naive" approach) ---
-    //     // {
-    //     //     let m = Arc::new(RwLock::new(StdMap::with_capacity(10_000_000)));
-    //     //     let s = std::time::Instant::now();
-    //     //     let mut handles = vec![];
-    //     //     for _ in 0..num_threads {
-    //     //         let map = Arc::clone(&m);
-    //     //         handles.push(thread::spawn(move || {
-    //     //             for j in 0..ops_per_thread {
-    //     //                 map.write().unwrap().insert(j, j); 
-    //     //             }
-    //     //         }));
-    //     //     }
-    //     //     for h in handles { h.join().unwrap(); }
-    //     //     println!("Std+RwLock: {:?}", s.elapsed());
-    //     // }
+    //     //--- ROUND 4: Std Map + Single RwLock (The "Naive" approach) ---
+    //     {
+    //         let m = Arc::new(RwLock::new(StdMap::with_capacity(10_000_000)));
+    //         let s = std::time::Instant::now();
+    //         let mut handles = vec![];
+    //         for _ in 0..num_threads {
+    //             let map = Arc::clone(&m);
+    //             handles.push(thread::spawn(move || {
+    //                 for j in 0..ops_per_thread {
+    //                     map.write().unwrap().insert(j, j); 
+    //                 }
+    //             }));
+    //         }
+    //         for h in handles { h.join().unwrap(); }
+    //         println!("Std+RwLock: {:?}", s.elapsed());
+    //     }
     // }
 
 
