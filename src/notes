@@ -39,3 +39,5 @@ sharded maps
 
 
 the map itself 
+
+RUSTFLAGS="-C target-cpu=native" cargo test --release -- --nocapture

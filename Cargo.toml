@@ -7,15 +7,16 @@ edition = "2024"
 anyhow = "1.0.102"
 libc = "0.2.183"
 memmap2 = "0.9.10"
-mimalloc = "0.1.48"
-papaya = "0.2.3"
-parking_lot = "0.12.5"
-
-
-
 
 
 [dependencies.xxhash-rust]
 version = "0.8.12"
 features = ["xxh3", "const_xxh3"]
+
+[profile.release]
+opt-level = 3
+incremental = false 
+lto = "fat"
+codegen-units = 1
+panic = "abort"
 

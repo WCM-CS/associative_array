@@ -1,548 +1,550 @@
 
 
-pub mod directory;
-pub mod map;
-pub mod payload;
-pub mod hash;
+pub use crate::hash_map::AssociativeArray;
 
-// pub struct HashMap<K, V> {
-//     maps: Box<[RwLock<ShardHashMap<K, V>>; 256]>
-// }
+mod hash_map {
+    use std::{
+        arch::x86_64::{
+            __m128i, 
+            _MM_HINT_T0, 
+            _mm_cmpeq_epi8, 
+            _mm_load_si128, 
+            _mm_movemask_epi8, 
+            _mm_prefetch, 
+            _mm_set1_epi8
+        },
+        hash::Hash,
+        cell::Cell, 
+        marker::PhantomData
+    };
 
+    use libc::{
+        c_void, 
+        MADV_HUGEPAGE, 
+        MADV_SEQUENTIAL, 
+        MADV_WILLNEED, 
+        madvise
+    };
+    use memmap2::MmapMut;
 
-// impl<K: Hash + PartialEq, V> HashMap<K, V> {
+    use crate::{hash::{Hashes, pod_hasher}, payload::Payload};
 
-//     pub fn new() -> Self {
-//         Self { maps: Box::new(std::array::from_fn(|_| RwLock::new(ShardHashMap::<K, V>::new()))) }
-//     }
+    pub struct AssociativeArray<K, V> {
+        // ------ HOT DATA --
+        directory_ptr: * mut u32, // 8 Bytes, ROUTER, 
 
-//     pub fn upsert(&self, key: K, value: V) { // rwlock allows for &self nonmut
-//         let h = pod_hasher(&key, HASH_SEED_SELECTION[0]);
-//         self.maps[h.shard as usize].write().upsert(key, value, h);
-//     }
+        payload_ptr: *mut Payload<K, V>, // 8 Bytes, 16 Bytes, DESTINATION
 
-//     pub fn get(&self, key: &K) -> Option<MappedRwLockReadGuard<'_, V>> {
-//         let h = pod_hasher(&key, HASH_SEED_SELECTION[0]);
-//         let guard = self.maps[h.shard as usize].read();
+        directory_len_mask: Cell<usize>, // 8 Bytes, 24 Bytes
+        global_depth: Cell<u32>, // 4 Bytes, 28 Bytes
+        _pad: u32, // 4 bytes, 32 bytes
 
-//         RwLockReadGuard::try_map(guard, |shard| {
-//             shard.get(key, h)
-//         }).ok()
-//     }
+            // -------- HALF CACHE LINE --------
 
-//     pub fn remove(&self, key: &K) -> Option<V> {
-//         let h = pod_hasher(&key, HASH_SEED_SELECTION[0]);
-//         self.maps[h.shard as usize].write().remove(key, h)
-//     }
+        // ---- WARM DATA ----
+        next_free_bucket: Cell<usize>, // 8 Bytes, 40 Bytes 
+        bucket_capacity: usize, // 8 Bytes, 48 Bytes
 
-//     pub fn stats(&self) {
-//         self.maps.iter().for_each(|shard| {
-//             shard.read().stats();
-//         });
-//     }
-// }
+        _padding: [u8; 16],
 
-// unsafe impl<K: Send, V: Send> Send for ShardHashMap<K, V> {}
-// unsafe impl<K: Send, V: Send> Sync for ShardHashMap<K, V> {}
+            // -------- CACHE LINE --------
 
+        // -- COLD DATA ----
+        _mmap_directory: MmapMut,
+        _mmap_payload: MmapMut, // MMAPPED ARENA FOR BUCKETS 32MB
 
-// pub struct ShardHashMap<K, V> {
-//     //inlined_directory: [u16; 1024], // First 0-9 expansions stay on the stack for inlined handle retreival for smaller maps
-    
-//     // -- HOT DATA -- 
-//     dir_ptr: *const u16, // 8 Bytes 
-//     buck_ptr: *mut Bucket<K, V>, // 8 Bytes  // 16
-//     mask: usize, // 8 Bytes  // 24
-//     shift: u32, // 4 Bytes // 28
+        _marker: PhantomData<(K, V)>
 
-//     // -- WARM DATA --
-//     state: AtomicU32, // 4 Bytes // 32
-//     buckets_count: usize, // 8 Bytes // 40
-//     buckets_capacity: usize, // 8 Bytes // 48
-//     directory_cap: usize, // 8 Bytes 56
-//     directory_len: usize, // 8 Bytes 
-
-//     // ---------------- CACHE LINE ----------------
-
-//     // -- COLD DATA (CONST OWNERS) -- 
-//     _mmap_dir: MmapMut,
-//     _mmap_buck: MmapMut,
-//     _marker: PhantomData<(K, V)>
-// }
-
-// impl<K, V> ShardHashMap<K, V> {
-//     #[inline(always)]
-//     fn get_bucket_ptr(&self) -> *mut Bucket<K, V> {
-//         self.buck_ptr as *mut Bucket<K, V>
-//     }
-
-//     #[inline(always)]
-//     fn get_bucket_mut(&mut self, idx: u16) -> &mut Bucket<K, V> {
-//         unsafe { &mut *self.get_bucket_ptr().add(idx as usize) }
-//     }
-
-//     #[inline(always)]
-//     fn get_bucket(&self, idx: u16) -> &Bucket<K, V> {
-//         unsafe { &*self.get_bucket_ptr().add(idx as usize) }
-//     }
-
-//     #[inline(always)]
-//     fn get_bucket_handle_fast(&self, h: &Hashes) -> u16 {
-//         unsafe {
-//             // If shift is 64, index is always 0. Otherwise, shift down.
-//             let idx = if self.shift >= 64 { 
-//                 0 
-//             } else { 
-//                 (h.directory_key >> self.shift) as usize 
-//             };
-//             *self.dir_ptr.add(idx)
-//         }
-//     }
-// }
+    }
 
 
-// impl<K: Hash + PartialEq, V> ShardHashMap<K, V> {
+    impl<K, V> AssociativeArray<K, V> 
+    where 
+        K: PartialEq + Hash 
+    {
 
-//     pub fn new() -> Self {
-//         // 1. Mmap the Bucket Arena (32MB)
-//         let arena_size = 32 * 1024 * 1024;
-//         let bucket_mmap = MmapMut::map_anon(arena_size).expect("Failed to mmap buckets");
-//         let buckets_capacity = arena_size / std::mem::size_of::<Bucket<K, V>>();
-
-//         // 2. Mmap the Directory (2MB) - Supports up to 1M directory entries
-//         let dir_cap_bytes = 2 * 1024 * 1024; 
-//         let dir_mmap = MmapMut::map_anon(dir_cap_bytes).expect("Failed to mmap directory");
-
-//         let dir_ptr = dir_mmap.as_ptr() as *mut u16;
-//         unsafe { *dir_ptr = 0; }
-
-//         unsafe {
-//             // Apply to Bucket Arena
-//             madvise(bucket_mmap.as_ptr() as *mut c_void, arena_size, MADV_HUGEPAGE);
-//             madvise(bucket_mmap.as_ptr() as *mut c_void, arena_size, MADV_WILLNEED);
-
-//             // Warmup the pages (best for low latency/consistency, bad for initial boot times) - manual pre page faulting
-//             let ptr = bucket_mmap.as_ptr() as *mut u8;
-//             for i in (0..arena_size).step_by(4096) {
-//                 std::ptr::write_volatile(ptr.add(i), 0);
-//             }
-        
-//             // Apply to Directory (Sequental access during expansion)
-//             madvise(dir_mmap.as_ptr() as *mut c_void, dir_cap_bytes, MADV_SEQUENTIAL);
-//         }
-
-//         let mut shard = Self {
-//             dir_ptr,
-//             buck_ptr: bucket_mmap.as_ptr() as *mut Bucket<K, V>,
-//             mask: 0,       // (1 << 0) - 1
-//             shift: 64,     // 64 - global_depth(0)
-//             state: AtomicU32::new(0),
-//             buckets_count: 1,
-//             buckets_capacity,
-//             directory_len: 1,
-//             directory_cap: dir_cap_bytes / 2,
-//             _mmap_dir: dir_mmap,
-//             _mmap_buck: bucket_mmap,
-//             _marker: PhantomData
-//         };
-
-//         // Initialize the first bucket inline
-//         let b0 = shard.get_bucket_mut(0);
-//         b0.local_depth = 0;
-//         b0.control = [0; 64];
-
-//         shard
-//     }
-
-//     fn global_expansion(&mut self) {
-//         let old_len = self.directory_len;
-//         let new_len = old_len * 2;
-    
-//         // Check for mmap capacity overflow
-//         if new_len > self.directory_cap {
-//             panic!("Dragon Map: Directory mmap capacity exceeded!");
-//         }
-
-//         unsafe {
-//             let ptr = self.dir_ptr as *mut u16;
-//             // Expand in place within the Mmap
-//             for i in (0..old_len).rev() {
-//                 let val = *ptr.add(i);
-//                 *ptr.add(i * 2) = val;
-//                 *ptr.add(i * 2 + 1) = val;
-//             }
-//         }
-
-//         self.directory_len = new_len;
-//         self.mask = new_len - 1;
-//         self.shift -= 1;
-//     }
-
-//     pub fn upsert(&mut self, key: K, value: V, h: Hashes) {
-//         loop {
-//             let handle = self.get_bucket_handle_fast(&h);
-//             let b: &mut Bucket<K, V> = self.get_bucket_mut(handle);
+        pub fn new() -> anyhow::Result<Self> {
+            // Need to pass in the mb the user needs since this can fail due to lack of memory on system and linux kernel not liking mass Mmapping of non-existent memory
+            let directory_arena_size = 1024 * 1024 * 1024;
+            let payload_arena_size = 32 * 1024 * 1024 * 1024;
             
-//             // CASE 1: Update an existing value
-//             if let Some((_, i)) = b.simd_lookup_bucket(&key, h.fingerprint) {
+
+            let payload_capacity = payload_arena_size / std::mem::size_of::<Payload<K, V>>();
+
+
+            let directory_mmap = MmapMut::map_anon(directory_arena_size)?;
+            let mut payload_mmap = MmapMut::map_anon(payload_arena_size)?;
+
+            let directory_ptr = directory_mmap.as_ptr() as *mut u32;
+            let payload_ptr = payload_mmap.as_mut_ptr() as *mut Payload<K, V>;
+
+            // MMAP Optimizations 
+            unsafe {
+                madvise(payload_ptr as *mut c_void, payload_arena_size, MADV_HUGEPAGE);
+                madvise(payload_ptr as *mut c_void, payload_arena_size, MADV_WILLNEED);
+
+                // Sequential for directory because expansion doubles it linearly
+                madvise(directory_ptr as *mut c_void, directory_arena_size, MADV_SEQUENTIAL);
+
+                // Physical page pre-faulting
+                let p_ptr = payload_mmap.as_mut_ptr();
+                for i in (0..payload_arena_size).step_by(4096) {
+                    std::ptr::write_volatile(p_ptr.add(i), 0);
+                }
+            }
+
+
+            // Initialize MetaData
+            unsafe {
                 
-//                 unsafe {
-//                     b.data.keys[i].assume_init_drop();
-//                     b.data.values[i].assume_init_drop();
-//                     std::ptr::write(b.data.keys[i].as_mut_ptr(), key);
-//                     std::ptr::write(b.data.values[i].as_mut_ptr(), value);
-//                 }
-//                 return;
-//             }
-
-//             // CASE 2: Insert payload
-//             let free_mask = b.reusable_mask();
-
-//             if free_mask != 0 {
-//                 let i = free_mask.trailing_zeros() as usize;// looks for the first 1 bit
-//                 unsafe {
-//                     std::ptr::write(b.data.keys[i].as_mut_ptr(), key);
-//                     std::ptr::write(b.data.values[i].as_mut_ptr(), value);
-//                 }
-//                 b.control[i] = h.fingerprint; 
-//                 return;
-//             } else {
-//                 // CASE 3: Bucket is full, call split
-//                 let occupied_mask = b.occupied_mask();
-//                 self.split(handle, h.directory_key, occupied_mask);
-//             }
-//         }
-//     }
+                // Directory Index 0 points to Bucket 0
+                std::ptr::write_volatile(directory_ptr, 0);
+                Payload::init_at(payload_ptr, 0);
+            }
 
 
-   
-    
-//     fn split(&mut self, bucket_idx: u16, trigger_hash: u64, mut occupied_mask: u64) {
-//       //  let idx = self.buckets[]
-//         if self.buckets_count >= self.buckets_capacity {
-//             panic!("Dragon Map Shard Overflow! Increase mmap reservation.");
-//         }
+            
 
-//         // check if global expansion is needed
-//         //let old_depth = self.get_bucket(bucket_idx).header.local_depth;
-//         let global_depth = 64 - self.shift;
-//         let old_depth = self.get_bucket(bucket_idx).local_depth;
-//         if old_depth == global_depth {
-//             self.global_expansion();
-//         }
+            Ok(Self {
+                directory_ptr,
+                payload_ptr,
+                directory_len_mask: Cell::new(0), 
+                global_depth: Cell::new(0),
+                _pad: 0,
+                next_free_bucket: Cell::new(1), // Bucket 0 is taken
+                bucket_capacity: payload_capacity,
+                _padding: [0; 16],
+                _mmap_directory: directory_mmap,
+                _mmap_payload: payload_mmap,
+                _marker: PhantomData,
+            })
+
+        }
 
 
-//         let current_global_depth = 64 - self.shift;
-//         let new_local_depth = old_depth + 1;
-//         let new_bucket_idx = self.buckets_count as u16;
-//         self.buckets_count += 1;
+        // Upsert
+        pub fn upsert(&self, key: K, value: V) {
+            let hashes: Hashes = pod_hasher(&key);
 
-//         unsafe {
-//             let bucket_base = self.get_bucket_ptr();
-//             let old_bucket = &mut *bucket_base.add(bucket_idx as usize);
-//             let new_bucket = &mut *bucket_base.add(new_bucket_idx as usize);
+            let target = unsafe { _mm_set1_epi8(hashes.fingerprint as i8) };
 
-//             new_bucket.control = [0x00; 64];
-//             new_bucket.local_depth = new_local_depth;
-//             old_bucket.local_depth = new_local_depth;
-
-//             // 2. Process ONLY occupied slots
-//        //     let mut temp_mask = occupied_mask;
-//             let mut new_idx = 0;
-
-//             while occupied_mask != 0 {
-//                 let i = occupied_mask.trailing_zeros() as usize;
+            loop {
                 
-//                 // Safety: We only access initialized keys/values based on the occupied mask
-//                 let key_ref = old_bucket.data.keys[i].assume_init_ref();
-//                 let h_move = pod_hasher(key_ref, HASH_SEED_SELECTION[0]);
+                let bucket_handle = self.get_bucket_handle(&hashes);
+                let bucket = self.get_bucket_mut(&bucket_handle);
 
-//                 // Check if the item moves to the new bucket based on the new depth bit
-//                 if (h_move.directory_key >> (64 - new_local_depth)) & 1 == 1 {
-//                     // Move to new bucket
-//                     std::ptr::copy_nonoverlapping(old_bucket.data.keys[i].as_ptr(), new_bucket.data.keys[new_idx].as_mut_ptr(), 1);
-//                     std::ptr::copy_nonoverlapping(old_bucket.data.values[i].as_ptr(), new_bucket.data.values[new_idx].as_mut_ptr(), 1);
-//                     new_bucket.control[new_idx] = old_bucket.control[i];
+                // CASE 1: Key exists, uppdate the value
+                unsafe {
+                    // Prefetch Keys for comaprasion operation after simd
+                    _mm_prefetch(bucket.keys.as_ptr() as *const i8, _MM_HINT_T0);
+
+                    // // Load the 16 fingerprints into the SSE 128 bit register 
+                    let fingerprints = _mm_load_si128(bucket.fingerprints.as_ptr() as *const __m128i);
+
+                    // // Broadcasts the fingerprint across all the u8 in the SSE
+                    // let target = _mm_set1_epi8(hashes.fingerprint as i8);
+
+                    // Compare the target to thefingerprints
+                    let m = _mm_cmpeq_epi8(fingerprints, target);
+
+                    // Bridge the results, for a u8 hit flips the bit mask to 1
+                    let bitmask = _mm_movemask_epi8(m) as u16; 
+
+                    // filter out trash results, ensure fingerpritn is active not removed or invalid
+                    let mut filtered_bitmask = bitmask & bucket.occupancy_bitmask;
+
+                    // Iterate oiver hits
+                    while filtered_bitmask != 0 {
+                        let i = filtered_bitmask.trailing_zeros() as usize; // returns when abit == 1
+
+                        if *bucket.keys[i].assume_init_ref() == key { // Hit on the key
+                            // Update Value
+                            bucket.values[i].assume_init_drop();
+                            std::ptr::write(bucket.values[i].as_mut_ptr(), value);
+                            return;
+                        } 
+
+                        filtered_bitmask &= filtered_bitmask - 1;
+                    }
+
+
+
+                    // CASE 2: No Key, But bucket has space, InsertPayload
+                    if bucket.occupancy_bitmask != 0xFFFF { // if ocupancy is not full, this is a common path for a insert 
+                        // insert elements
+                        let i = (!bucket.occupancy_bitmask).trailing_zeros() as usize; // flip occupancy mask to free mask
+                        
+                        std::ptr::write(bucket.keys[i].as_mut_ptr(), key);
+                        std::ptr::write(bucket.values[i].as_mut_ptr(), value);
+
+                        bucket.fingerprints[i] = hashes.fingerprint;
+                        bucket.occupancy_bitmask |= 1 << i; // flip the bit to occupied
                     
-//                     // Mark old as EMPTY
-//                     old_bucket.control[i] = 0x00; 
-//                     new_idx += 1;
-//                 }
+                        return;
+                    } else {
+
+                        // CASE 3: No Key, But bucket hno as space, Split (and globally expand if needed) then InsertPayload
+                        let current_free = self.next_free_bucket.get();
+                        
+
+                        if current_free >= self.bucket_capacity {
+                            panic!("Hashmap Ran out of memory in the 32 MB arena")
+                        }
+                        self.next_free_bucket.set(current_free + 1);
+
+                    //   let old_bucket = self.get_bucket_mut(&bucket_handle);
+
+                        // Expand GLobally
+                        if bucket.local_depth == self.global_depth.get() {
+                            // Expand Directory
+                            let old_len = self.directory_len_mask.get() + 1;
+
+                            std::ptr::copy_nonoverlapping(self.directory_ptr, self.directory_ptr.add(old_len), old_len);
+                        
+                            let current_depth = self.global_depth.get();
+                            self.global_depth.set(current_depth + 1);
+
+                            self.directory_len_mask.set((old_len * 2) - 1);
+                        
+                        }
+
+
+                        let new_bucket_ptr = self.payload_ptr.add(current_free);
+                        Payload::init_at(new_bucket_ptr, bucket.local_depth + 1);
+
+                        let new_bucket = &mut *new_bucket_ptr;
+
+                        bucket.local_depth += 1;
+                        let split_bit = 1 << (bucket.local_depth - 1);
+                        let mut occupied = bucket.occupancy_bitmask;
+                        let mut new_bucketcount = 0;
+
+                        while occupied != 0 {
+                            let i = occupied.trailing_zeros() as usize;
+
+                            let key_ref = bucket.keys[i].assume_init_ref();
+                            let h = pod_hasher(key_ref);
+
+                            if (h.directory_key & split_bit) != 0 {
+                                let dest_idx = new_bucketcount;
+
+
+                                std::ptr::copy_nonoverlapping(bucket.keys[i].as_ptr(), new_bucket.keys[dest_idx].as_mut_ptr(), 1);
+                                std::ptr::copy_nonoverlapping(bucket.values[i].as_ptr(), new_bucket.values[dest_idx].as_mut_ptr(), 1);
+                                
+                                //let target_idx = new_bucket.occupancy_bitmask.count_ones() as usize;
+                                new_bucket.fingerprints[dest_idx] = bucket.fingerprints[i];
+                                new_bucket.occupancy_bitmask |= 1 << dest_idx; // Set new occupancy bit
+                                new_bucketcount += 1;
+
+                                // Clear from old bucket
+                                bucket.occupancy_bitmask &= !(1 << i);
+
+                            }
+
+                            occupied &= !(1 << i); // lets loop continue
+                        }
+
+                        let step = 1 << bucket.local_depth;
+                        let mask = self.directory_len_mask.get();
+                        let mut dir_idx = (hashes.directory_key as usize & (step - 1)) | split_bit as usize;
+                        
+                        while dir_idx <= mask {
+                            *self.directory_ptr.add(dir_idx) = current_free as u32;
+                            dir_idx += step;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Insert
+
+        pub unsafe fn insert(&self, key: K, value: V) {
+            let hashes = pod_hasher(&key);
+
+            loop {
+                // let new_slot = self.next_free_bucket.get_mut();
+
+                let bucket_handle = self.get_bucket_handle(&hashes);
+                let bucket = self.get_bucket_mut(&bucket_handle);
                 
-//                 occupied_mask &= !(1 << i);// advanced the loop via tarailign zero returning the next result 1
-//             }
-//         }
+                
+                // check if we need to expand the bucket or directiory
+                unsafe {
+                    if bucket.occupancy_bitmask != 0xFFFF {
+                        // insert elements
+                        
+                        let i = (!bucket.occupancy_bitmask).trailing_zeros() as usize; // flip occupancy mask to free mask
+                        
+                        std::ptr::write(bucket.keys[i].as_mut_ptr(), key);
+                        std::ptr::write(bucket.values[i].as_mut_ptr(), value);
 
-//         // Update the directory pointers
-//         let stride = 1 << (current_global_depth - new_local_depth);
-//         let block_size = 1 << (current_global_depth - old_depth);
-        
-//         // Calculate which part of the directory needs to point to the new bucket
-//         let base_idx = (trigger_hash >> self.shift) as usize & !(block_size - 1);
-//         let split_idx = base_idx + stride;
+                        bucket.fingerprints[i] = hashes.fingerprint;
+                        bucket.occupancy_bitmask |= 1 << i; // flip the bit to occupied
+                    
+                        return;
+                        
+                    } else {
+                        // CASE 3: No Key, But bucket hno as space, Split (and globally expand if needed) then InsertPayload
+                        let current_free = self.next_free_bucket.get();
+                        
 
-//         unsafe {
-//             let base_ptr = self.dir_ptr as *mut u16;
-//             for j in split_idx..(base_idx + block_size) {
-//                 *base_ptr.add(j) = new_bucket_idx;
-//             }
-//         }
-//     }
+                        if current_free >= self.bucket_capacity {
+                            panic!("Hashmap Ran out of memory in the 32 MB arena")
+                        }
+                        self.next_free_bucket.set(current_free + 1);
 
-//     pub fn get(&self, key: &K, h: Hashes) -> Option<&V> {
-//         let handle = self.get_bucket_handle_fast(&h);
-//         let b = self.get_bucket(handle);
+                        //   let old_bucket = self.get_bucket_mut(&bucket_handle);
 
-//         unsafe { _mm_prefetch(b.data.keys.as_ptr() as *const i8, _MM_HINT_T0); }
-        
-//         match b.simd_lookup_bucket(key, h.fingerprint) {
-//             Some((v,_)) => Some(v),
-//             None => None,
-//         }
-//     }
+                        // Expand GLobally
+                        if bucket.local_depth == self.global_depth.get() {
+                            // Expand Directory
+                            let old_len = self.directory_len_mask.get() + 1;
 
-//     pub fn remove(&mut self, key: &K, h: Hashes) -> Option<V> {
-//         let handle = self.get_bucket_handle_fast(&h);
-//         let b = self.get_bucket_mut(handle);
-    
-//         if let Some((_, idx)) = b.simd_lookup_bucket(key, h.fingerprint) {
-//             unsafe {
-//                 let bucket = self.get_bucket_mut(handle);
-//                 std::ptr::drop_in_place(bucket.data.keys[idx].as_mut_ptr());
-//                 let v = bucket.data.values[idx].assume_init_read(); // returens the real vlaue nto a ref to it
-//                 bucket.control[idx] = 0x7F; // tombstone
+                            std::ptr::copy_nonoverlapping(self.directory_ptr, self.directory_ptr.add(old_len), old_len);
+                        
+                            let current_depth = self.global_depth.get();
+                            self.global_depth.set(current_depth + 1);
 
-//                 return Some(v);
-//             }
-//         }
-
-//         None
-//     }
-
-    
+                            self.directory_len_mask.set((old_len * 2) - 1);
+                        
+                        }
 
 
-//     pub fn stats(&self) {
-//         let global_depth = 64 - self.shift;
-//         let base = self.dir_ptr as *const u16;
+                        let new_bucket_ptr = self.payload_ptr.add(current_free);
+                        Payload::init_at(new_bucket_ptr, bucket.local_depth + 1);
 
-//         let directory_slice = unsafe {
-//             std::slice::from_raw_parts(base, self.directory_len)
-//         };
+                        let new_bucket = &mut *new_bucket_ptr;
 
-//         // Count unique buckets in the directory
-//         let unique_buckets = directory_slice.iter()
-//             .collect::<std::collections::HashSet<_>>().len();
-        
-//         let total_slots = unique_buckets * 64;
-//         let mut occupied = 0;
+                        bucket.local_depth += 1;
+                        let split_bit = 1 << (bucket.local_depth - 1);
+                        let mut occupied = bucket.occupancy_bitmask;
+                        let mut new_bucketcount = 0;
 
-//         // Iterate through the bump-allocated arena
-//         for i in 0..self.buckets_count {
-//             let b = self.get_bucket(i as u16);
-//             for slot in 0..64 {
-//                 // Check MSB: 1000 0000
-//                 if (b.control[slot] & 0x80) != 0 {
-//                     occupied += 1;
-//                 }
-//             }
-//         }
+                        while occupied != 0 {
+                            let i = occupied.trailing_zeros() as usize;
 
-//         let load_factor = if total_slots > 0 {
-//             (occupied as f64 / total_slots as f64) * 100.0
-//         } else {
-//             0.0
-//         };
+                            let key_ref = bucket.keys[i].assume_init_ref();
+                            let h = pod_hasher(key_ref);
 
-//         println!("--- Dragon Map Shard Stats ---");
-//         println!("Global Depth:   {}", global_depth);
-//         println!("Directory Len:  {}", self.directory_len);
-//         println!("Unique Buckets: {}", unique_buckets);
-//         println!("Total Buckets:  {}", self.buckets_count); 
-//         println!("Occupied Slots: {}", occupied);
-//         println!("Load Factor:    {:.2}%\n", load_factor);
-//     }
-
-// }
-
-// impl<K, V> Drop for ShardHashMap<K, V> {
-//     fn drop(&mut self) {
-//         let base: *mut Bucket<K, V> = self.get_bucket_ptr();
-//         for i in 0..self.buckets_count {
-//             unsafe {
-//                 std::ptr::drop_in_place(base.add(i));
-//             }
-//         }
-//     }
-// }
-
-// #[repr(align(64))]
-// struct Bucket<K, V> {
-//     // Swiss Table fingerprints + Control Bit for SIMD
-//     control: [u8; 64], // 64 Bytes 
-
-//     // ---------------- CACHE LINE ----------------
-
-//     // Cache line 2
-//    // state: AtomicU32, // 4 Bytes 
-//     local_depth: u32,  // 4 Bytes // 4
-
-//     //version: AtomicU32, // FOR
-//     //_pad: [u32; 15],
-
-//     // ---------------- CACHE LINE ----------------
-
-//     // Cache line 3+
-//     data: Payload<K, V>
-// }
-
-// struct Payload<K, V> {
-//     keys: [MaybeUninit<K>; 64],
-//     values: [MaybeUninit<V>; 64],
-// }
-
-// // Occupied 0x80 - 1000 0000
-// // Tombstone 0x7F - 0111 1111
-// // Empty 0x00 - 0000 0000
-
-// impl<K, V> Bucket<K, V> {
-//     #[inline(always)]
-//     fn free_masks(&self) -> u64 {
-//         unsafe {
-//             let ptr = self.control.as_ptr() as *const __m128i;
-//             // A slot is "Free" ONLY if it is 0x00.
-//             let m0 = _mm_movemask_epi8(_mm_cmpeq_epi8(_mm_load_si128(ptr), _mm_setzero_si128())) as u32;
-//             let m1 = _mm_movemask_epi8(_mm_cmpeq_epi8(_mm_load_si128(ptr.add(1)), _mm_setzero_si128())) as u32;
-//             let m2 = _mm_movemask_epi8(_mm_cmpeq_epi8(_mm_load_si128(ptr.add(2)), _mm_setzero_si128())) as u32;
-//             let m3 = _mm_movemask_epi8(_mm_cmpeq_epi8(_mm_load_si128(ptr.add(3)), _mm_setzero_si128())) as u32;
-//             (m0 as u64) | ((m1 as u64) << 16) | ((m2 as u64) << 32) | ((m3 as u64) << 48)
-//         }
-//     }
-
-//     #[inline(always)]
-//     fn occupied_mask(&self) -> u64 {
-//         unsafe {
-//             let ptr = self.control.as_ptr() as *const __m128i;
-//             // A slot is "Occupied" ONLY if the MSB is 1 (0x80..0xFF)
-//             let m0 = _mm_movemask_epi8(_mm_load_si128(ptr)) as u32;
-//             let m1 = _mm_movemask_epi8(_mm_load_si128(ptr.add(1))) as u32;
-//             let m2 = _mm_movemask_epi8(_mm_load_si128(ptr.add(2))) as u32;
-//             let m3 = _mm_movemask_epi8(_mm_load_si128(ptr.add(3))) as u32;
-//             (m0 as u64) | ((m1 as u64) << 16) | ((m2 as u64) << 32) | ((m3 as u64) << 48)
-//         }
-//     }
-
-//     #[inline(always)]
-//     fn reusable_mask(&self) -> u64 {
-//         unsafe {
-//             let ptr = self.control.as_ptr() as *const __m128i;
-//             // Movemask extracts the MSB (bit 7). 
-//             // We want slots where bit 7 is 0. So we get the occupied mask and bitwise NOT it.
-//             let m0 = _mm_movemask_epi8(_mm_load_si128(ptr)) as u32;
-//             let m1 = _mm_movemask_epi8(_mm_load_si128(ptr.add(1))) as u32;
-//             let m2 = _mm_movemask_epi8(_mm_load_si128(ptr.add(2))) as u32;
-//             let m3 = _mm_movemask_epi8(_mm_load_si128(ptr.add(3))) as u32;
-//             let occupied = (m0 as u64) | ((m1 as u64) << 16) | ((m2 as u64) << 32) | ((m3 as u64) << 48);
-//             !occupied // Any slot not occupied is reusable
-//         }
-//     }
-// }
+                            if (h.directory_key & split_bit) != 0 {
+                                let dest_idx = new_bucketcount;
 
 
+                                std::ptr::copy_nonoverlapping(bucket.keys[i].as_ptr(), new_bucket.keys[dest_idx].as_mut_ptr(), 1);
+                                std::ptr::copy_nonoverlapping(bucket.values[i].as_ptr(), new_bucket.values[dest_idx].as_mut_ptr(), 1);
+                                
+                                //let target_idx = new_bucket.occupancy_bitmask.count_ones() as usize;
+                                new_bucket.fingerprints[dest_idx] = bucket.fingerprints[i];
+                                new_bucket.occupancy_bitmask |= 1 << dest_idx; // Set new occupancy bit
+                                new_bucketcount += 1;
 
-// impl<K: PartialEq, V> Bucket<K, V> {
-//     #[inline(always)]
-//     fn simd_lookup_bucket(&self, key: &K,fingerprint: u8) -> Option<(&V, usize)> {
-//        // let bucket = self.get_bucket(bucket_idx); // Using our helper
+                                // Clear from old bucket
+                                bucket.occupancy_bitmask &= !(1 << i);
 
+                            }
 
-//         unsafe {
-//             // Prefetch
-//             _mm_prefetch(self.data.keys.as_ptr() as *const i8, _MM_HINT_T0);
+                            occupied &= !(1 << i); // lets loop continue
+                        }
 
-//             let target = _mm_set1_epi8(fingerprint as i8);
-//             let ptr = self.control.as_ptr() as *const __m128i;
-
-//             let m0 = _mm_movemask_epi8(_mm_cmpeq_epi8(_mm_load_si128(ptr), target)) as u32;
-//             let m1 = _mm_movemask_epi8(_mm_cmpeq_epi8(_mm_load_si128(ptr.add(1)), target)) as u32;
-//             let m2 = _mm_movemask_epi8(_mm_cmpeq_epi8(_mm_load_si128(ptr.add(2)), target)) as u32;
-//             let m3 = _mm_movemask_epi8(_mm_cmpeq_epi8(_mm_load_si128(ptr.add(3)), target)) as u32;
-
-//             let mut final_mask = (m0 as u64) | ((m1 as u64) << 16) | ((m2 as u64) << 32) | ((m3 as u64) << 48);
-
-//             while final_mask != 0 {
-//                 let idx = final_mask.trailing_zeros() as usize;
-//                 if self.data.keys.get_unchecked(idx).assume_init_ref() == key {
-//                     return Some((self.data.values.get_unchecked(idx).assume_init_ref(), idx));
-//                 }
-//                 final_mask &= !(1 << idx);
-//             }
-//             None
-//         }
-//     }
-// }
+                        let step = 1 << bucket.local_depth;
+                        let mask = self.directory_len_mask.get();
+                        let mut dir_idx = (hashes.directory_key as usize & (step - 1)) | split_bit as usize;
+                        
+                        while dir_idx <= mask {
+                            *self.directory_ptr.add(dir_idx) = current_free as u32;
+                            dir_idx += step;
+                        }
+                        continue;
+                    }
+                }
+            }
+        }
 
 
-// impl<K, V> Drop for Bucket<K, V> {
-//     fn drop(&mut self) {
-//         for i in 0..64 {
-//             // ONLY drop if MSB is 1. Tombstones (0x7F) and Empty (0x00) have MSB 0.
-//             if (self.control[i] & 0x80) != 0 {
-//                 unsafe {
-//                     self.data.keys[i].assume_init_drop();
-//                     self.data.values[i].assume_init_drop();
-//                 }
-//             }
-//         }
-//     }
-// }
+        // Get
+        pub fn get(&self, key: &K) -> Option<&V> {
+            let hashes = pod_hasher(key);
+            let bucket_handle = self.get_bucket_handle(&hashes);
+            let bucket = self.get_bucket(&bucket_handle);
+
+            unsafe {
+                _mm_prefetch(bucket.keys.as_ptr() as *const i8, _MM_HINT_T0);
+
+                let fingerprints = _mm_load_si128(bucket.fingerprints.as_ptr() as *const __m128i);
+                let target = _mm_set1_epi8(hashes.fingerprint as i8);
+                let m = _mm_cmpeq_epi8(fingerprints, target);
+                let bitmask = _mm_movemask_epi8(m) as u16;
+
+                let mut filtered_bitmask = bitmask & bucket.occupancy_bitmask;
+
+                while filtered_bitmask != 0 {
+                    let i = filtered_bitmask.trailing_zeros() as usize;
+
+                    if bucket.keys[i].assume_init_ref() == key {
+                        return Some(bucket.values[i].assume_init_ref());
+                    }
+                    filtered_bitmask &= filtered_bitmask - 1;
+                }
+            }
+            None
+        }
 
 
-// pub const HASH_SEED_SELECTION: [u64; 6] = [
-//     0x8badf00d, 0xdeadbabe, 0xabad1dea, 0xdeadbeef, 0xcafebabe, 0xfeedface,
-// ];
+        // Remove
+        pub fn remove(&self, key: &K) -> Option<V> {
+            let hashes = pod_hasher(key);
+            let bucket_handle = self.get_bucket_handle(&hashes);
+            let bucket = self.get_bucket_mut(&bucket_handle);
+
+            unsafe {
+                _mm_prefetch(bucket.keys.as_ptr() as *const i8, _MM_HINT_T0);
+
+                let fingerprints = _mm_load_si128(bucket.fingerprints.as_ptr() as *const __m128i);
+                let target = _mm_set1_epi8(hashes.fingerprint as i8);
+                let m = _mm_cmpeq_epi8(fingerprints, target);
+                let bitmask = _mm_movemask_epi8(m) as u16;
+
+                let mut filtered_bitmask = bitmask & bucket.occupancy_bitmask;
+
+                while filtered_bitmask != 0 {
+                    let i = filtered_bitmask.trailing_zeros() as usize;
+
+                    if bucket.keys[i].assume_init_ref() == key {
+                        std::ptr::drop_in_place(bucket.keys[i].as_mut_ptr());
+                        let v = bucket.values[i].assume_init_read(); 
+                        bucket.occupancy_bitmask &= !(1 << i);
+                        return Some(v);
+                    }
+                    filtered_bitmask &= filtered_bitmask - 1;
+                }
+            }
+            None
+        }
+
+        // Helpers 
+        #[inline(always)]
+        fn get_bucket_handle(&self, h: &Hashes) -> u32 {
+            unsafe {
+                let idx = (h.directory_key as usize) & self.directory_len_mask.get(); // get the global depth bits
+                *self.directory_ptr.add(idx)
+            }
+        }
+
+        #[inline(always)]
+        fn get_bucket_ptr(&self) -> *mut Payload<K, V> {
+            self.payload_ptr as *mut Payload<K, V>
+        }
+
+        #[inline(always)]
+        fn get_bucket_mut(&self, idx: &u32) -> &mut Payload<K, V> { // returning a mut ref from a non mut self
+            unsafe { &mut *self.get_bucket_ptr().add(*idx as usize) }
+        }
+
+        #[inline(always)]
+        fn get_bucket(&self, idx: &u32) -> &Payload<K, V> {
+            unsafe { &*self.get_bucket_ptr().add(*idx as usize) }
+        }
+
+        pub fn stats(&self) {
+            let global_depth = self.global_depth.get();
+            let directory_size = self.directory_len_mask.get() + 1;
+            let allocated_buckets = self.next_free_bucket.get();
+            
+            let mut total_items = 0;
+            let mut max_local_depth = 0;
+            let mut min_local_depth = u32::MAX;
+            
+            // We only iterate through the unique buckets in the payload arena
+            for i in 0..allocated_buckets {
+                let bucket = self.get_bucket(&(i as u32));
+                total_items += bucket.occupancy_bitmask.count_ones();
+                max_local_depth = max_local_depth.max(bucket.local_depth);
+                min_local_depth = min_local_depth.min(bucket.local_depth);
+            }
+
+            let fill_factor = (total_items as f64 / (allocated_buckets as f64 * 16.0)) * 100.0;
+            let bytes_per_item = (self._mmap_payload.len() + self._mmap_directory.len()) as f64 / total_items as f64;
+
+            println!("--- HashMap Stats ---");
+            println!("Items:            {}", total_items);
+            println!("Buckets Used:     {}/{}", allocated_buckets, self.bucket_capacity);
+            println!("Directory Size:   {} (Depth: {})", directory_size, global_depth);
+            println!("Local Depth:      Min: {}, Max: {}", min_local_depth, max_local_depth);
+            println!("Fill Factor:      {:.2}%", fill_factor);
+            println!("Memory Efficiency: {:.2} bytes/item", bytes_per_item);
+            println!("---------------------");
+        }
+    }
+
+}
 
 
-// pub struct Hashes {
-//     directory_key: u64,
-//     fingerprint: u8,
-//     shard: u8,
-// }
 
-// #[inline(always)]
-// fn pod_hasher<K: Hash>(key: &K, seed: u64) -> Hashes {
-//     //let mut s = Xxh3::with_seed(seed);
-//     //key.hash(&mut s);
-//     //let h = s.digest128();
-//     let mut s = Xxh3::with_seed(seed);
-//     key.hash(&mut s);
-//     let h = s.digest();
+mod payload {
+    use std::{mem::MaybeUninit, sync::atomic::{AtomicU32, Ordering}};
+
+    #[repr(C, align(64))]
+    pub struct Payload<K, V> {
+        pub fingerprints: [u8; 16], // 16 Bytes 
+
+        //Bitmask repalced control bit in fingerprint, allows 2x entrophy
+        pub occupancy_bitmask: u16, // 2 Bytes, 18 Bytes 
 
 
-//     let shard = (h &0xFF) as u8; 
-//     // Force bit 7 to 1 (0x80) so it's always marked "Occupied"
-//     let fingerprint = (((h >> 8) & 0x7F) as u8) | 0x80;
+        pub control_state: AtomicU32, // 22
+        // The MSB determined if the bucket is being rehashed, the other 31 bits determine the ref count
 
-//     Hashes { directory_key: h, fingerprint, shard }
-// }
+        pub local_depth: u32, // 4 Bytes, 26 Bytes 
+        _padding: [u8; 6], // 10 Bytes, 32 Bytes
 
-// pub enum Memory {
-//     Mb2,
-//     Mb4,
-//     Mb32,
-//     Mb64,
-//     Mb128
-// }
+        // -------- HALF CACHE LINE --------
+
+        pub keys: [MaybeUninit<K>; 16],
+        pub values: [MaybeUninit<V>; 16],
+    }
 
 
-// impl Memory {
-//     fn to_size(&self) -> usize {
-//         match self {
-//             Memory::Mb2 => 1024 * 1024 * 2,
-//             Memory::Mb4 => 1024 * 1024 * 4,
-//             Memory::Mb32 => 1024 * 1024 * 32,
-//             Memory::Mb64 => 1024 * 1024 * 64,
-//             Memory::Mb128 => 1024 * 1024 * 128,
-//         }
-//     }
-// }
+
+    impl<K, V> Payload<K, V> {
+        pub unsafe fn init_at(ptr: *mut Self, local_depth: u32) {
+            let b = unsafe { &mut *ptr };
+            
+            b.occupancy_bitmask = 0;
+            b.fingerprints = [0u8; 16];
+            b.control_state.store(0, Ordering::Relaxed);
+            b.local_depth = local_depth;
+        }
+    }
+
+}
+
+
+
+mod hash {
+    use xxhash_rust::xxh3::{Xxh3};
+    use std::hash::Hash;
+
+    pub const HASH_SEED_SELECTION: [u64; 6] = [
+        0x8badf00d, 0xdeadbabe, 0xabad1dea, 0xdeadbeef, 0xcafebabe, 0xfeedface,
+    ];
+
+    pub struct Hashes {
+        pub directory_key: u64,
+        pub fingerprint: u8,
+    }
+
+    #[inline(always)]
+    pub fn pod_hasher<K: Hash>(key: &K) -> Hashes {
+        let mut s = Xxh3::with_seed(HASH_SEED_SELECTION[0]);
+        key.hash(&mut s);
+        let h = s.digest();
+
+        let fingerprint = (h >> 56) as u8; 
+
+        Hashes { directory_key: h, fingerprint }
+    }
+}
+
+

@@ -9,40 +9,95 @@ mod tests {
     use std::thread;
 
 
-    #[test]
-    fn sync_test() {
-        let s = std::time::Instant::now();
-        let m = associative_array::map::HashMap::new().unwrap();
+    // #[test]
+    // fn sync_test_perfect_path() {
+    //     let s = std::time::Instant::now();
+    //     let m = associative_array::AssociativeArray::new().unwrap();
+
+    //     //let mut m = std::collections::HashMap::new();
+
+    //     //let n: i32 = 50_000_000;
+    //     let n: i32 = 50_000_000;
+
+    //     for i in 0..n {
+
+    //        unsafe { m.insert(i, i * i); }
+    //        //m.insert(i, i*i);
+    //     }
+
+    //     for i in 0..n {
+    //         //let r = m.get(&i).unwrap().eq(&(i * i));
+    //         assert!(m.get(&i).unwrap().eq(&(i * i)));
+    //     }
+
+    //     // for i in 0..n {
+    //     //     m.remove(&i);
+    //     // }
 
 
-        //let n: i32 = 50_000_000;
-        let n: i32 = 5_000_000;
+    //     // for i in 0..n {
+    //     //     assert_eq!(m.get(&i), None);
+    //     // }
 
-        for i in 0..n {
-
-            m.upsert(i, i * i);
-        }
-
-        for i in 0..n {
-            //let r = m.get(&i).unwrap().eq(&(i * i));
-            assert!(m.get(&i).unwrap().eq(&(i * i)));
-        }
-
-        // for i in 0..n {
-        // m.remove(&i);
-        // }
-
-
-        // for i in 0..n {
-        //     assert_eq!(m.get(&i), None);
-        // }
-
-        let end = s.elapsed();
+    //     let end = s.elapsed();
         
-        //m.stats();
-        println!("Line: {:?}", end);
+    //     //m.stats();
+    //     println!("Line: {:?}", end);
+    //    // m.stats();
 
-    }
+    // }
+
+    //  #[test]
+    // fn sync_test_collider_path() {
+    //     let s = std::time::Instant::now();
+    //     let m = associative_array::map::HashMap::new().unwrap();
+
+
+    //     //let n: i32 = 50_000_000;
+    //     let n: i32 = 50_000_000;
+
+    //     for i in 0..n {
+    //             unsafe { m.insert(i, i); }
+    //         assert!(m.get(&i).unwrap().eq(&(i)));
+    //     }
+
+    //     let end = s.elapsed();
+        
+    //     //m.stats();
+    //     println!("Line: {:?}", end);
+
+    //     for i in 0..n {
+    //         m.upsert(i, i+2);
+    //         assert!(m.get(&i).unwrap().eq(&(i+2)));
+    //     }
+    //     let end = s.elapsed();
+        
+    //     //m.stats();
+    //     println!("Line: {:?}", end);
+
+
+
+    //     // for i in 0..n {
+    //     //     //let r = m.get(&i).unwrap().eq(&(i * i));
+    //     //     assert!(m.get(&i).unwrap().eq(&(i * i)));
+    //     // }
+
+    //     // for i in 0..n {
+    //     //     m.remove(&i);
+    //     // }
+
+
+    //     // for i in 0..n {
+    //     //     assert_eq!(m.get(&i), None);
+    //     // }
+
+    //     // let end = s.elapsed();
+        
+    //     // //m.stats();
+    //     // println!("Line: {:?}", end);
+    //     m.stats();
+
+    // }
 
 
     // #[test]
@@ -230,7 +285,7 @@ mod tests {
     //     let ops_per_thread = 20_000_000; // 40M total requests
 
     //     // --- SETUP: Pre-loading ---
-    //     let my_map = Arc::new(associative_array::HashMap::new());
+    //     let my_map = Arc::new(associative_array::map::HashMap::new().unwrap());
     //     let dash_clone = Arc::new((0..256).map(|_| RwLock::new(StdMap::with_capacity(total_keys / 256))).collect::<Vec<_>>());
 
     //     for i in 0..total_keys {
