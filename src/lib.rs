@@ -86,11 +86,12 @@ mod hash_map {
                 // Sequential for directory because expansion doubles it linearly
                 madvise(directory_ptr as *mut c_void, directory_arena_size, MADV_SEQUENTIAL);
 
-                // Physical page pre-faulting
-                let p_ptr = payload_mmap.as_mut_ptr();
-                for i in (0..payload_arena_size).step_by(4096) {
-                    std::ptr::write_volatile(p_ptr.add(i), 0);
-                }
+                // // Physical page pre-faulting - this is really fast but actually eats the memory ofo the full mmapping, aka touches all virtual allcoation making it physcial 
+
+                // let p_ptr = payload_mmap.as_mut_ptr();
+                // for i in (0..payload_arena_size).step_by(4096) {
+                //     std::ptr::write_volatile(p_ptr.add(i), 0);
+                // }
             }
 
 
@@ -258,7 +259,7 @@ mod hash_map {
             }
         }
 
-        // Insert
+        // Insert, unsafe no simd or key check, does not ovewrite data, therefore will duplicate, only use for bulk loads or guearenteed unique keys inserts, otherwise use upsert
 
         pub unsafe fn insert(&self, key: K, value: V) {
             let hashes = pod_hasher(&key);

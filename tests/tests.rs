@@ -9,48 +9,48 @@ mod tests {
     use std::thread;
 
 
-    // #[test]
-    // fn sync_test_perfect_path() {
-    //     let s = std::time::Instant::now();
-    //     let m = associative_array::AssociativeArray::new().unwrap();
+    #[test]
+    fn sync_test_perfect_path() {
+        let s = std::time::Instant::now();
+        let m = associative_array::AssociativeArray::new().unwrap();
 
-    //     //let mut m = std::collections::HashMap::new();
+        //let mut m = std::collections::HashMap::new();
 
-    //     //let n: i32 = 50_000_000;
-    //     let n: i32 = 50_000_000;
+        //let n: i32 = 50_000_000;
+        let n: i32 = 50_000_000;
 
-    //     for i in 0..n {
+        for i in 0..n {
 
-    //        unsafe { m.insert(i, i * i); }
-    //        //m.insert(i, i*i);
-    //     }
+           unsafe { m.insert(i, i * i); }
+           //m.insert(i, i*i);
+        }
 
-    //     for i in 0..n {
-    //         //let r = m.get(&i).unwrap().eq(&(i * i));
-    //         assert!(m.get(&i).unwrap().eq(&(i * i)));
-    //     }
+        for i in 0..n {
+            //let r = m.get(&i).unwrap().eq(&(i * i));
+            assert!(m.get(&i).unwrap().eq(&(i * i)));
+        }
 
-    //     // for i in 0..n {
-    //     //     m.remove(&i);
-    //     // }
+        // for i in 0..n {
+        //     m.remove(&i);
+        // }
 
 
-    //     // for i in 0..n {
-    //     //     assert_eq!(m.get(&i), None);
-    //     // }
+        // for i in 0..n {
+        //     assert_eq!(m.get(&i), None);
+        // }
 
-    //     let end = s.elapsed();
+        let end = s.elapsed();
         
-    //     //m.stats();
-    //     println!("Line: {:?}", end);
-    //    // m.stats();
+        //m.stats();
+        println!("Line: {:?}", end);
+       // m.stats();
 
-    // }
+    }
 
     //  #[test]
     // fn sync_test_collider_path() {
     //     let s = std::time::Instant::now();
-    //     let m = associative_array::map::HashMap::new().unwrap();
+    //     let m = associative_array::AssociativeArray::new().unwrap();
 
 
     //     //let n: i32 = 50_000_000;
