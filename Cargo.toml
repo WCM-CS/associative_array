@@ -14,9 +14,9 @@ version = "0.8.12"
 features = ["xxh3", "const_xxh3"]
 
 [profile.release]
-opt-level = 3
-incremental = false 
-lto = "fat"
-codegen-units = 1
-panic = "abort"
+opt-level = 3 # full llvm optimizations
+incremental = false # turns off incremental build overhead 
+lto = "fat" # link time optizations for non flattend modules & crates 
+codegen-units = 1 # forces single threaded compilation for best optimizations
+panic = "abort" # tells rust not to panic gracefully(destructors) and just crashes
 
