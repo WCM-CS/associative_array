@@ -1,0 +1,43 @@
+Associative array 
+- Google absiel swiss table
+- Google Go Extendible hashing
+- DashMap/PerfectHasMap - Static Partitions
+- Seastar - Thread Per Core TperC / 
+
+
+Future improvements
+- Instead of Locking the static shards we need per bucket atomic operation
+
+Fast Path
+- Updates and Removes Call CAS or RCU over the Bucket (Cas for fastest Inlined Operion, RCU for Larger MVCC type operation on larger Values liek maps)
+
+Slow Path
+- Spin Lock For Rehashing
+
+use a atomic u32 for the state machine
+- MSB = 1 means we are rehashing, if MSB = 0 then we are free to CAS or RCU
+ 31 bit is a control bit
+ 30-0 are the Count of threads/operations 
+
+
+
+ SeaStar
+
+ Ona  regest get id per core
+ - WE map core id to a range of shards
+ - 256 / N OS threads 
+ - Redistribute the remainger shards across the first Shards
+
+
+
+
+
+stick with sse 128 bit simd
+
+
+sharded maps
+
+
+the map itself 
+
+RUSTFLAGS="-C target-cpu=native" cargo test --release -- --nocapture
