@@ -17,7 +17,6 @@ mod hash_map {
         cell::Cell, 
         marker::PhantomData
     };
-
     use libc::{
         c_void, 
         MADV_HUGEPAGE, 
@@ -25,13 +24,19 @@ mod hash_map {
         MADV_WILLNEED, 
         madvise
     };
+    use anyhow::Result;
     use memmap2::MmapMut;
 
-    use crate::{hash::{Hashes, pod_hasher}, payload::Payload};
+    use crate::{
+        hash::{
+            Hashes, pod_hasher
+        }, 
+        payload::Payload
+    };
 
     pub struct AssociativeArray<K, V> {
         // ------ HOT DATA --
-        directory_ptr: * mut u32, // 8 Bytes, ROUTER, 
+        directory_ptr: *mut u32, // 8 Bytes, ROUTER, 
 
         payload_ptr: *mut Payload<K, V>, // 8 Bytes, 16 Bytes, DESTINATION
 
@@ -63,7 +68,7 @@ mod hash_map {
         K: PartialEq + Hash 
     {
 
-        pub fn new() -> anyhow::Result<Self> {
+        pub fn new() -> Result<Self> {
             // Need to pass in the mb the user needs since this can fail due to lack of memory on system and linux kernel not liking mass Mmapping of non-existent memory
             let directory_arena_size = 1024 * 1024 * 1024;
             let payload_arena_size = 32 * 1024 * 1024 * 1024;
@@ -484,7 +489,12 @@ mod hash_map {
 
 
 mod payload {
-    use std::{mem::MaybeUninit, sync::atomic::{AtomicU32, Ordering}};
+    use std::{
+        mem::MaybeUninit, 
+        sync::atomic::{
+            AtomicU32, Ordering
+        }
+    };
 
     #[repr(C, align(64))]
     pub struct Payload<K, V> {
@@ -524,7 +534,7 @@ mod payload {
 
 
 mod hash {
-    use xxhash_rust::xxh3::{Xxh3};
+    use xxhash_rust::xxh3::Xxh3;
     use std::hash::Hash;
 
     pub const HASH_SEED_SELECTION: [u64; 6] = [
