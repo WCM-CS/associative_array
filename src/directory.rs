@@ -1,9 +1,14 @@
 use std::sync::atomic::{
-    AtomicPtr, 
-    AtomicU32, Ordering
+    AtomicBool, 
+    AtomicU32, 
+    Ordering
 };
 
-use crossbeam_epoch::{Atomic, Guard, Shared};
+use crossbeam_epoch::{
+    Atomic, 
+    Guard, 
+    Shared
+};
 
 
 
@@ -42,7 +47,7 @@ impl RouterShard {
     pub unsafe fn get_bucket_idx(&self, dir_shared: Shared<'_, u32>, dir_key: u32, mask: u32) -> u32 {
         let dir_idx = dir_key & mask;
         let dir_ptr = dir_shared.as_raw();
-        *dir_ptr.add(dir_idx as usize)
+        unsafe { *dir_ptr.add(dir_idx as usize)}
     }
 
 
@@ -53,7 +58,7 @@ pub struct AllocatorShard {
     pub bucket_base_idx: u32, // 4 bytes
     pub next_offset: AtomicU32, // 4 bytes, 8
     pub max_offset: u32, // 4 bytes, 12
-    pub _pad: u32
+    pub is_active_expanding: AtomicBool
 }
 
 

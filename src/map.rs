@@ -1,4 +1,4 @@
-use std::{arch::x86_64::{__m128i, _MM_HINT_T0, _mm_cmpeq_epi8, _mm_load_si128, _mm_movemask_epi8, _mm_prefetch, _mm_set1_epi8}, marker::PhantomData, sync::atomic::{AtomicPtr, AtomicU32, Ordering}};
+use std::{arch::x86_64::{__m128i, _MM_HINT_T0, _mm_cmpeq_epi8, _mm_load_si128, _mm_movemask_epi8, _mm_prefetch, _mm_set1_epi8}, marker::PhantomData, sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, Ordering}};
 use std::hash::Hash;
 use crossbeam_epoch::{Atomic, Shared};
 use libc::{
@@ -110,7 +110,7 @@ where
                 bucket_base_idx: first_bucket_idx,
                 next_offset: AtomicU32::new(1), // already used 0
                 max_offset: buckets_per_shard as u32,
-                _pad: 0,
+                is_active_expanding: AtomicBool::new(false)
             });
 
         }
@@ -147,7 +147,7 @@ where
         // pin for the EBR over the atomic pointer to the dir handles
 
         let h = pod_hasher(key);
-        let directory = &self.directory_routing[h.shard_idx as usize];
+        let directory = &self.directory_routing[h.shard_idx as usize & 1023];
 
         loop {
             // Using the directorys router shard ( the HOT PATH )
@@ -231,7 +231,7 @@ where
         // pin for the EBR over the atomic pointer to the dir handles
 
         let h = pod_hasher(key);
-        let directory = &self.directory_routing[h.shard_idx as usize];
+        let directory = &self.directory_routing[h.shard_idx as usize & 1023];
 
 
 
@@ -306,9 +306,38 @@ where
 
     pub fn upsert(&self, key: K, value: V) -> UpsertStatus<V> {
 
+        // Hash the key, index into radix directory shard, aquire the proper directory for the key
+        let guard = &crossbeam_epoch::pin();
+        // pin for the EBR over the atomic pointer to the dir handles
+
+        let h = pod_hasher(&key);
+        let directory = &self.directory_routing[h.shard_idx as usize & 1023];
 
 
-        
+
+
+
+        loop {
+
+            let (dir_ptr, mask, _depth)  = directory.get_routing_snapshot(guard);
+            let bucket_idx = unsafe { directory.get_bucket_idx(dir_ptr, h.directory_key, mask)};
+
+
+
+
+
+
+
+
+
+
+
+
+        }
+
+
+
+
         UpsertStatus::Inserted
     }
 

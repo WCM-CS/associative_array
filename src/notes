@@ -1,32 +1,3 @@
-Associative array 
-- Google absiel swiss table
-- Google Go Extendible hashing
-- DashMap/PerfectHasMap - Static Partitions
-- Seastar - Thread Per Core TperC / 
-
-
-Future improvements
-- Instead of Locking the static shards we need per bucket atomic operation
-
-Fast Path
-- Updates and Removes Call CAS or RCU over the Bucket (Cas for fastest Inlined Operion, RCU for Larger MVCC type operation on larger Values liek maps)
-
-Slow Path
-- Spin Lock For Rehashing
-
-use a atomic u32 for the state machine
-- MSB = 1 means we are rehashing, if MSB = 0 then we are free to CAS or RCU
- 31 bit is a control bit
- 30-0 are the Count of threads/operations (ref count)
-
-
-
- SeaStar
-
- Ona  regest get id per core
- - WE map core id to a range of shards
- - 256 / N OS threads 
- - Redistribute the remainger shards across the first Shards
 
 
 Atomic Associative Array
@@ -36,6 +7,8 @@ Directory uses radix sharding by 1024 to minimize handling copy latency on globa
 Radix shards are SOA structures with routing shards for the hot path and allocation shards for bucket splits or global expansions.
 SOA Shard handles are inlined, the shards store handles into mmapped arenas. 
 Directory shards handles are stored in one mmap arena split by 1024.. The buckets have a separate larger a mmap arena.
+Directory uses atomic EBR pointer to mmap directory u32 handles to avoid dangling pointers on expansion.
+
 Buckets
 We use the hash trie of the global len to index into the directory to get the buckets handle. The bucket itself stores 16 key-value pairs.
 We SIMD scan over 16 u8 fingerprints set to check for collision. Then before a key comparison which required a mmap pointer hop we compare an inlined u16 second fingerprint.
@@ -45,14 +18,5 @@ Writers block readers, readers dont block.
 
 
 
-
-
-stick with sse 128 bit simd
-
-
-sharded maps
-
-
-the map itself 
 
 RUSTFLAGS="-C target-cpu=native" cargo test --release -- --nocapture
