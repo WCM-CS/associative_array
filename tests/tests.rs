@@ -12,7 +12,7 @@ mod tests {
     #[test]
     fn sync_test_perfect_path() {
         let s = std::time::Instant::now();
-        let m = associative_array::AssociativeArray::new().unwrap();
+        let m = associative_array::HashMap::new(32, 1).unwrap();
 
         //let mut m = std::collections::HashMap::new();
 
@@ -43,7 +43,7 @@ mod tests {
         
         //m.stats();
         println!("Line: {:?}", end);
-       // m.stats();
+       m.stats();
 
     }
 
