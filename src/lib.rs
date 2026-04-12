@@ -20,10 +20,10 @@
 
 
 
-mod hash;
-mod bucket;
-mod directory;
-mod map;
+pub mod hash;
+pub mod bucket;
+pub mod directory;
+pub mod map;
 
 
 

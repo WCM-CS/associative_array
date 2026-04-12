@@ -53,12 +53,22 @@ impl RouterShard {
 
 }
 
-#[repr(C, align(16))]
+#[repr(C, align(32))]
 pub struct AllocatorShard {
+    // Manages the MMAP Arena Allocations
+
+    // Bucket memory metadata
     pub bucket_base_idx: u32, // 4 bytes
-    pub next_offset: AtomicU32, // 4 bytes, 8
-    pub max_offset: u32, // 4 bytes, 12
-    pub is_active_expanding: AtomicBool
+    pub next_bucket_offset: AtomicU32, // 4 bytes, 8
+    pub max_buckets: u32, // 4 bytes, 12
+
+    // directory metadata
+    pub runway_base_ptr: *mut u32, // 20 bytes
+    pub next_dir_offsets: AtomicU32, // 24 bytes
+    pub max_dir_slots: u32, // 28 bytes
+
+    // control byte
+    pub is_active_expanding: AtomicBool // 32 bytes
 }
 
 

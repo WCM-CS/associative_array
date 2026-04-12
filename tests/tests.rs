@@ -3,49 +3,95 @@
 
 #[cfg(test)]
 mod tests {
+    use std::time::Instant;
 
-    //use super::*;
-    use std::sync::Arc;
-    use std::thread;
+    use associative_array::map::{HashMap, UpsertStatus};
+
 
 
     #[test]
-    fn sync_test_perfect_path() {
-        let s = std::time::Instant::now();
-        let m = associative_array::HashMap::new(32, 1).unwrap();
+    fn atomic_hashmap_test_a() {
+        let m: HashMap<i32, i32> = HashMap::new(16, 2).unwrap();
 
-        //let mut m = std::collections::HashMap::new();
 
-        //let n: i32 = 50_000_000;
-        let n: i32 = 50_000_000;
+        let n = 50_000_000;
+        println!("starting test of {} items ...", n);
 
+
+        let start = Instant::now();
         for i in 0..n {
+            let n = m.upsert(i, i + i);
+            assert_eq!(n, UpsertStatus::Inserted);
 
-           unsafe { m.insert(i, i * i); }
-           //m.insert(i, i*i);
         }
 
+        let dur_2 = start.elapsed();
+        println!("Upsert took: {:?} ({:.2} million ops/sec)", 
+            dur_2, 
+            n as f64 / dur_2.as_secs_f64() / 1_000_000.0
+        );
+
+
+        println!("Verifying data...");
+        let start_get = Instant::now();
         for i in 0..n {
-            //let r = m.get(&i).unwrap().eq(&(i * i));
-            assert!(m.get(&i).unwrap().eq(&(i * i)));
+            let res = m.get(&i);
+            assert!(res.is_some(), "Key {} not found!", i);
+            assert_eq!(*res.unwrap(), i + i);
         }
+        println!("Verification took: {:?}", start_get.elapsed());
 
-        // for i in 0..n {
-        //     m.remove(&i);
-        // }
+        m.stats();
 
 
-        // for i in 0..n {
-        //     assert_eq!(m.get(&i), None);
-        // }
-
-        let end = s.elapsed();
-        
-        //m.stats();
-        println!("Line: {:?}", end);
-       m.stats();
 
     }
+
+
+}
+
+//     //use super::*;
+//     use std::sync::Arc;
+//     use std::thread;
+
+
+//     #[test]
+//     fn sync_test_perfect_path() {
+//         let s = std::time::Instant::now();
+//         let m = associative_array::HashMap::new(32, 1).unwrap();
+
+//         //let mut m = std::collections::HashMap::new();
+
+//         //let n: i32 = 50_000_000;
+//         let n: i32 = 50_000_000;
+
+//         for i in 0..n {
+
+//            unsafe { m.insert(i, i * i); }
+//            //m.insert(i, i*i);
+//         }
+
+//         for i in 0..n {
+//             //let r = m.get(&i).unwrap().eq(&(i * i));
+//             assert!(m.get(&i).unwrap().eq(&(i * i)));
+//         }
+
+//         // for i in 0..n {
+//         //     m.remove(&i);
+//         // }
+
+
+//         // for i in 0..n {
+//         //     assert_eq!(m.get(&i), None);
+//         // }
+
+//         let end = s.elapsed();
+        
+//         //m.stats();
+//         println!("Line: {:?}", end);
+//        m.stats();
+
+//     }
 
     //  #[test]
     // fn sync_test_collider_path() {
@@ -329,5 +375,3 @@ mod tests {
     //     println!("Map (Steady): {:?}", your_time);
     //     println!("DashMap  (Steady): {:?}", dash_time);
     // }
-
-}
